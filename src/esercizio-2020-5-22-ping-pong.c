@@ -1,122 +1,129 @@
-#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
-
+#include <limits.h>
+#include <errno.h>
+#include <semaphore.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <sys/fcntl.h>
 #include <sys/mman.h>
-
-#include <errno.h>
-
-/*
-Scrivere un programma che realizza un "ping-pong" tra due processi utilizzando una coppia di pipe,
-una per ogni direzione.
-
-Il contatore (di tipo int) viene incrementato ad ogni ping ed ad ogni pong e viene trasmesso attraverso la pipe.
-
-Quanto il contatore raggiunge il valore MAX_VALUE il programma termina.
-
-proc_padre manda a proc_figlio il valore 0 attraverso pipeA.
-proc_figlio riceve il valore 0, lo incrementa (=1) e lo manda a proc_padre attraverso pipeB.
-proc_padre riceve il valore 1, lo incrementa (=2) e lo manda a proc_figlio attraverso pipeA.
-proc_figlio riceve il valore 2 .....
-
-fino a MAX_VALUE, quando termina il programma.
-(il primo processo che arriva a MAX_VALUE fa terminare il programma).
-
-
- */
 
 #define MAX_VALUE 1000000
 
-#define CHECK_ERR(a,msg) {if ((a) == -1) { perror((msg)); exit(EXIT_FAILURE); } }
+int globalCounter;
+sem_t sem;
 
-int pipeA[2];
-int pipeB[2];
-// proc_padre legge da pipeB, scrive su pipeA
-// proc_figlio legge da pipeA, scrive su pipeB
+void process_1(int * pipe_fd_1[], int * pipe_fd_2[]){
+    close(pipe_fd_1[0]); // Close read end of pipe_1
+    close(pipe_fd_2[1]); // Close write end of pipe_2
+    int * buffer_r = calloc(1, sizeof(int));
+    int * buffer_w = calloc(1, sizeof(int));
+    int loc;
+    int res;
+    while(globalCounter != MAX_VALUE){
+        if(sem_wait(&sem) == -1){
+            perror("sem_wait()");
+            exit(EXIT_FAILURE);
+        }
+        //FASE CRITICA
+        res = read(pipe_fd_2[0], buffer_r, sizeof(int));
+        if(res == -1){
+            perror("read()");
+            exit(EXIT_FAILURE);
+        }
+        if(*buffer_r == globalCounter){
+            printf("correct\n");
+        }
+        loc = globalCounter;
+        loc++;
+        globalCounter = loc;
+        *buffer_w = loc;
+        res = write(pipe_fd_1[1], buffer_w, sizeof(int));
+        if(res == -1){
+            perror("write()");
+            exit(EXIT_FAILURE);
+        }
+        //FASE CRITICA
+        if(sem_post(&sem) == -1){
+            perror("sem_post()");
+            exit(EXIT_FAILURE);
+        }
+         printf("[PARENT]: globalCounter incremented to: %d\n", globalCounter);
+    }
+}
+void process_2(int * pipe_fd_1[], int * pipe_fd_2[]){
+    close(pipe_fd_1[1]); // Close write end of pipe_1
+    close(pipe_fd_2[0]); // Close read end of pipe_2
+    int loc;
+    int * buffer_r = calloc(1, sizeof(int));
+    int * buffer_w = calloc(1, sizeof(int));
+    int res;
+    while(globalCounter != MAX_VALUE){
+        if(sem_wait(&sem) == -1){
+            perror("sem_wait()");
+            exit(EXIT_FAILURE);
+        }
+        //FASE CRITICA
+        res = read(pipe_fd_1[0], buffer_r, sizeof(int));
+        if(res == -1){
+            perror("read()");
+            exit(EXIT_FAILURE);
+        }
+        if(*buffer_r == globalCounter){
+            printf("correct\n");
+        }
+        loc = globalCounter;
+        loc++;
+        globalCounter = loc;
+        *buffer_w = loc;
+        res = write(pipe_fd_2[1], buffer_w, sizeof(int));
+        if(res == -1){
+            perror("write()");
+            exit(EXIT_FAILURE);
+        }
+        //FASE CRITICA
+        if(sem_post(&sem) == -1){
+            perror("sem_post()");
+            exit(EXIT_FAILURE);
+        }
+        printf("[CHILD]: globalCounter incremented to: %d\n", globalCounter);
+    }
+}
 
-int main() {
-
-	int res;
-	int counter = 0;
-
-	res = pipe(pipeA);
-	CHECK_ERR(res, "pipe")
-
-	res = pipe(pipeB);
-	CHECK_ERR(res, "pipe")
-
-	switch(fork()) {
-		case 0: // child process
-
-			// proc_figlio legge da pipeA, scrive su pipeB
-			close(pipeA[1]);
-			close(pipeB[0]);
-
-			while (counter < MAX_VALUE) {
-
-				res = read(pipeA[0], &counter, sizeof(counter));
-				CHECK_ERR(res,"read")
-
-				if (res == 0) {
-					printf("[child] EOF su pipeA\n");
-					break;
-				}
-
-				printf("[child] dopo read: counter=%d\n", counter);
-
-				counter++;
-
-				printf("[child] prima di write: counter=%d\n", counter);
-
-				res = write(pipeB[1], &counter, sizeof(counter));
-				CHECK_ERR(res,"write")
-			}
-
-			printf("[child] fuori da while: counter=%d\n", counter);
-
-			printf("[child] bye\n");
-
-			exit(EXIT_SUCCESS);
-		case -1:
-			perror("fork()");
-			exit(EXIT_FAILURE);
-		default:
-			;
+int main(int argc, char*argv){
+    int pipe_fd_1[2];
+    int pipe_fd_2[2];
+    int res;
+    int s;
+    if (pipe(pipe_fd_1) == -1) {
+		perror("pipe()");
+		exit(EXIT_FAILURE);
 	}
-
-	// proc_padre legge da pipeB, scrive su pipeA
-	close(pipeA[0]);
-	close(pipeB[1]);
-
-	while (counter < MAX_VALUE) {
-
-		printf("[parent] prima di write: counter=%d\n", counter);
-
-		res = write(pipeA[1], &counter, sizeof(counter));
-		CHECK_ERR(res,"write")
-
-		res = read(pipeB[0], &counter, sizeof(counter));
-		CHECK_ERR(res,"read")
-
-		if (res == 0) {
-			printf("[parent] EOF su pipeA\n");
-			break;
-		}
-
-		printf("[parent] dopo read: counter=%d\n", counter);
-
-		counter++;
+    if (pipe(pipe_fd_2) == -1) {
+		perror("pipe()");
+		exit(EXIT_FAILURE);
 	}
-
-	printf("[parent] fuori da while: counter=%d\n", counter);
-
-	printf("[parent] bye\n");
-
-
-	return 0;
+    if(s = sem_init(&sem, 0,1) == -1){
+        perror("sem_init()");
+        exit(EXIT_FAILURE);
+    }
+    switch(fork()){
+        case -1: /* Error */
+            perror("fork()");
+            exit(EXIT_FAILURE);
+            break;
+        case 0: /* Child process */
+            process_2(&pipe_fd_1, &pipe_fd_2);
+            break;
+        default: /* Parent process */
+            process_1(&pipe_fd_1, &pipe_fd_2);
+    }
+    printf("final globalCounter = %d\n", globalCounter);
+    if(s = sem_destroy(&sem) == -1){
+        perror("sem_init()");
+        exit(EXIT_FAILURE);
+    }
+    exit(EXIT_SUCCESS);
 }
